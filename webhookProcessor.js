@@ -30,30 +30,24 @@ async function processWebhookToBirthRegistration(webhookBody) {
   
   // If composition not in entries, extract ID from task focus reference
   const compositionId = composition?.id || task?.focus?.reference?.split('/')?.[1];
+  // Child is the Patient with gender field
   const child = entries.find(e => 
     e.resource?.resourceType === 'Patient' && 
-    e.resource?.identifier?.some(id => id.type?.coding?.some(c => c.code === 'BIRTH_REGISTRATION_NUMBER'))
+    e.resource?.gender
   )?.resource;
   
-  const motherRelation = entries.find(e => 
-    e.resource?.resourceType === 'RelatedPerson' && 
-    e.resource.relationship?.coding?.some(c => c.code === 'MOTHER')
-  )?.resource;
-  
-  const mother = motherRelation ? entries.find(e => 
+  // Mother and father are Patients without gender field and active
+  const parentPatients = entries.filter(e => 
     e.resource?.resourceType === 'Patient' && 
-    e.resource?.id === motherRelation.patient?.reference?.split('/')?.[1]
-  )?.resource : null;
+    !e.resource?.gender &&
+    e.resource?.active === true
+  ).map(e => e.resource);
   
-  const fatherRelation = entries.find(e => 
-    e.resource?.resourceType === 'RelatedPerson' && 
-    e.resource.relationship?.coding?.some(c => c.code === 'FATHER')
-  )?.resource;
+  const mother = parentPatients[0] || null; // First parent is mother
+  const father = parentPatients[1] || null; // Second parent is father (if exists)
   
-  const father = fatherRelation ? entries.find(e => 
-    e.resource?.resourceType === 'Patient' && 
-    e.resource?.id === fatherRelation.patient?.reference?.split('/')?.[1]
-  )?.resource : null;
+  // Check if father exists in the data
+  const hasFather = father !== null;
 
   if (!child || !task || !mother || !compositionId) {
     throw new Error('Missing required data: child, task, mother, or composition ID');
@@ -72,21 +66,27 @@ async function processWebhookToBirthRegistration(webhookBody) {
   const localChildId = crypto.randomUUID();
   const localEventId = crypto.randomUUID();
   
-  // Extract local UUIDs from webhook or generate new ones
-  const localMotherId = mother.localId || crypto.randomUUID();
-  const shouldInsertMother = !mother.localId; // New record if no localId in webhook
+  // Extract external UUIDs from identifiers or generate new ones
+  const motherExternalUuid = mother.identifier?.find(id => 
+    id.type?.coding?.some(c => c.code === 'EXTERNAL_PERSON_ID')
+  )?.value;
+  const localMotherId = motherExternalUuid || crypto.randomUUID();
+  const shouldInsertMother = !motherExternalUuid; // New record if no external UUID
   
+  // Father logic - always create if no external UUID found
   let localFatherId = null;
   let shouldInsertFather = false;
-  if (father) {
-    localFatherId = father.localId || crypto.randomUUID();
-    shouldInsertFather = !father.localId; // New record if no localId in webhook
+  if (hasFather) {
+    const fatherExternalUuid = father?.identifier?.find(id => 
+      id.type?.coding?.some(c => c.code === 'EXTERNAL_PERSON_ID')
+    )?.value;
+    localFatherId = fatherExternalUuid || crypto.randomUUID();
+    shouldInsertFather = !fatherExternalUuid; // New record if no external UUID
   }
 
   // Child identifiers
   const childIdentifiers = [
     { type: 'NATIONAL_ID', value: registrationNumber },
-    buildCRVSIdentifier(child.id, 'birth'),
     ...child.identifier.filter(i => i.value?.trim()).map(i => ({
       type: i.type?.coding?.[0]?.code || 'UNKNOWN',
       value: i.value
@@ -101,6 +101,7 @@ async function processWebhookToBirthRegistration(webhookBody) {
     gender: child.gender || '',
     dob: child.birthDate || null,
     place_of_birth: 'Unknown',
+    place_of_birth_uuid: child.extension?.find(ext => ext.url === 'http://opencrvs.org/specs/extension/placeOfBirth')?.valueReference?.reference?.split('/')?.[1] || null,
     identifiers: JSON.stringify(childIdentifiers),
     status: 'active',
     created_at: now,
@@ -116,9 +117,7 @@ async function processWebhookToBirthRegistration(webhookBody) {
     source: 'OpenCRVS',
     metadata: JSON.stringify({ 
       trackingId,
-      registrationNumber,
-      crvsTaskId: task.id,
-      childBirthDate: child.birthDate // Store actual birth date in metadata
+      registrationNumber
     }),
     crvs_event_uuid: compositionId,
     duplicates: null,
@@ -173,7 +172,7 @@ async function processWebhookToBirthRegistration(webhookBody) {
     }
   ];
 
-  if (father && localFatherId) {
+  if (hasFather && localFatherId) {
     participantPayloads.push({
       id: crypto.randomUUID(),
       person_id: localFatherId,
@@ -184,12 +183,15 @@ async function processWebhookToBirthRegistration(webhookBody) {
         relationship: 'FATHER',
         ...(isFatherInformant && { informantType: 'FATHER' })
       }),
-      crvs_person_id: father.id,
-      status: 'active',
+      crvs_person_id: father?.id || 'unknown-father-crvs-id',
+      status: shouldInsertFather ? 'review' : 'active',
       remarks: shouldInsertFather ? 'New person created from CRVS webhook' : null,
       created_at: now
     });
   }
+
+  // New persons to create
+  const newPersons = [];
 
   // Add other informant if exists
   if (isOtherInformant && informantPatient) {
@@ -235,9 +237,6 @@ async function processWebhookToBirthRegistration(webhookBody) {
       });
     }
   }
-
-  // New persons to create
-  const newPersons = [];
   const newEvents = [];
   const newParticipants = [];
 
@@ -290,19 +289,19 @@ async function processWebhookToBirthRegistration(webhookBody) {
     });
   }
 
-  if (father && shouldInsertFather) {
+  if (shouldInsertFather) {
     const fatherBirthEventId = crypto.randomUUID();
     
     newPersons.push({
       id: localFatherId,
-      given_name: father.name[0]?.given?.filter(n => n).join(' ') || '',
-      family_name: father.name[0]?.family || '',
-      gender: father.gender || 'male',
-      dob: father.birthDate || null,
+      given_name: father?.name?.[0]?.given?.filter(n => n).join(' ') || 'Unknown',
+      family_name: father?.name?.[0]?.family || 'Father',
+      gender: father?.gender || 'male',
+      dob: father?.birthDate || null,
       place_of_birth: 'Unknown',
       identifiers: JSON.stringify([
-        buildCRVSIdentifier(father.id, 'birth'),
-        ...(father.identifier || []).filter(i => i.value?.trim()).map(i => ({
+        buildCRVSIdentifier(father?.id || 'unknown-father-crvs-id', 'birth'),
+        ...(father?.identifier || []).filter(i => i.value?.trim()).map(i => ({
           type: i.type?.coding?.[0]?.code || 'UNKNOWN',
           value: i.value
         }))
@@ -315,7 +314,7 @@ async function processWebhookToBirthRegistration(webhookBody) {
     newEvents.push({
       id: fatherBirthEventId,
       event_type: 'birth',
-      event_date: father.birthDate || null,
+      event_date: father?.birthDate || null,
       location: 'Unknown',
       source: 'seed',
       metadata: JSON.stringify({ note: 'generated birth by crvs' }),
@@ -333,11 +332,13 @@ async function processWebhookToBirthRegistration(webhookBody) {
       event_id: fatherBirthEventId,
       role: 'subject',
       relationship_details: JSON.stringify({ import: 'crvs' }),
-      crvs_person_id: father.id,
+      crvs_person_id: father?.id || 'unknown-father-crvs-id',
       status: 'active',
       created_at: now
     });
   }
+
+
 
   return {
     personPayload,

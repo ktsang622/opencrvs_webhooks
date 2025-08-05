@@ -18,12 +18,12 @@ async function insertIntoDatabase(sqlPayloads) {
     // Insert new persons first (parents)
     for (const person of sqlPayloads.newPersons) {
       await client.query(`
-        INSERT INTO person (id, given_name, family_name, gender, dob, place_of_birth, identifiers, status, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO person (id, given_name, family_name, gender, dob, place_of_birth, place_of_birth_uuid, identifiers, status, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (id) DO NOTHING
       `, [
         person.id, person.given_name, person.family_name, person.gender,
-        person.dob, person.place_of_birth, person.identifiers, person.status,
+        person.dob, person.place_of_birth, person.place_of_birth_uuid || null, person.identifiers, person.status,
         person.created_at, person.updated_at
       ]);
     }
@@ -55,14 +55,14 @@ async function insertIntoDatabase(sqlPayloads) {
     
     // Insert main child person
     await client.query(`
-      INSERT INTO person (id, given_name, family_name, gender, dob, place_of_birth, identifiers, status, created_at, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      INSERT INTO person (id, given_name, family_name, gender, dob, place_of_birth, place_of_birth_uuid, identifiers, status, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       ON CONFLICT (id) DO NOTHING
     `, [
       sqlPayloads.personPayload.id, sqlPayloads.personPayload.given_name, sqlPayloads.personPayload.family_name,
       sqlPayloads.personPayload.gender, sqlPayloads.personPayload.dob, sqlPayloads.personPayload.place_of_birth,
-      sqlPayloads.personPayload.identifiers, sqlPayloads.personPayload.status, sqlPayloads.personPayload.created_at,
-      sqlPayloads.personPayload.updated_at
+      sqlPayloads.personPayload.place_of_birth_uuid, sqlPayloads.personPayload.identifiers, sqlPayloads.personPayload.status,
+      sqlPayloads.personPayload.created_at, sqlPayloads.personPayload.updated_at
     ]);
     
     // Insert birth event
