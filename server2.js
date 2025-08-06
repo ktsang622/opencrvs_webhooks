@@ -6,7 +6,7 @@ const { insertIntoDatabase } = require('./database.js');
 const app = express();
 
 const PORT = process.env.PORT || 9999;
-const SHARED_SECRET = 'df72e58b-1fc8-4241-8789-2a92ef6f9b37';
+const SHARED_SECRET = process.env.WEBHOOK_SECRET || 'df72e58b-1fc8-4241-8789-2a92ef6f9b37';
 
 // Capture raw body for HMAC verification
 app.use('/webhooks', (req, res, next) => {
@@ -74,17 +74,65 @@ app.post('/webhooks', async (req, res) => {
       try {
         const sqlPayloads = await processWebhookToBirthRegistration(parsedBody);
         
-        console.log('\n💾 Generated SQL Payloads:');
+        console.log('\n💾 DATABASE INSERT SUMMARY:');
+        console.log('============================');
+        console.log('- Child person: 1 INSERT');
+        console.log('- Birth event: 1 INSERT');
+        console.log('- Participants:', sqlPayloads.participantPayloads.length, 'INSERTs');
+        console.log('- New persons:', sqlPayloads.newPersons.length, 'INSERTs');
+        console.log('- New events:', sqlPayloads.newEvents.length, 'INSERTs');
+        console.log('- New participants:', sqlPayloads.newParticipants.length, 'INSERTs');
+        console.log('- Total INSERTs:', (1 + 1 + sqlPayloads.participantPayloads.length + sqlPayloads.newPersons.length + sqlPayloads.newEvents.length + sqlPayloads.newParticipants.length));
+        
+        console.log('\n📋 RECORD DETAILS:');
         console.log('- Child:', sqlPayloads.personPayload.given_name, sqlPayloads.personPayload.family_name);
-        console.log('- Registration:', sqlPayloads.personPayload.identifiers);
-        console.log('- Event ID:', sqlPayloads.eventPayload.id);
-        console.log('- Participants:', sqlPayloads.participantPayloads.length);
-        console.log('- New persons to create:', sqlPayloads.newPersons.length);
+        console.log('- Registration ID:', sqlPayloads.eventPayload.metadata ? JSON.parse(sqlPayloads.eventPayload.metadata).registrationNumber : 'N/A');
+        console.log('- Event UUID:', sqlPayloads.eventPayload.crvs_event_uuid);
         
-        // Insert into PostgreSQL
-        await insertIntoDatabase(sqlPayloads);
+        // Sequential database insertion
+        console.log('\n🔄 Starting sequential database insertion...');
         
-        console.log('\n📦 Data inserted into database successfully');
+        // 1. Insert new persons first
+        if (sqlPayloads.newPersons.length > 0) {
+          console.log('📝 Inserting', sqlPayloads.newPersons.length, 'new persons...');
+          for (const personPayload of sqlPayloads.newPersons) {
+            await insertIntoDatabase({ personPayload, eventPayload: null, participantPayloads: [], newPersons: [], newEvents: [] });
+          }
+        }
+        
+        // 2. Insert new events for new persons
+        if (sqlPayloads.newEvents.length > 0) {
+          console.log('📝 Inserting', sqlPayloads.newEvents.length, 'new events...');
+          for (const eventPayload of sqlPayloads.newEvents) {
+            await insertIntoDatabase({ personPayload: null, eventPayload, participantPayloads: [], newPersons: [], newEvents: [] });
+          }
+        }
+        
+        // 3. Insert new participants for new persons
+        if (sqlPayloads.newParticipants.length > 0) {
+          console.log('📝 Inserting', sqlPayloads.newParticipants.length, 'new participants...');
+          for (const participantPayload of sqlPayloads.newParticipants) {
+            await insertIntoDatabase({ personPayload: null, eventPayload: null, participantPayloads: [participantPayload], newPersons: [], newEvents: [] });
+          }
+        }
+        
+        // 4. Insert main child person
+        console.log('📝 Inserting main child person...');
+        await insertIntoDatabase({ personPayload: sqlPayloads.personPayload, eventPayload: null, participantPayloads: [], newPersons: [], newEvents: [] });
+        
+        // 5. Insert birth event
+        console.log('📝 Inserting birth event...');
+        await insertIntoDatabase({ personPayload: null, eventPayload: sqlPayloads.eventPayload, participantPayloads: [], newPersons: [], newEvents: [] });
+        
+        // 6. Insert all participants
+        if (sqlPayloads.participantPayloads.length > 0) {
+          console.log('📝 Inserting', sqlPayloads.participantPayloads.length, 'participants...');
+          for (const participantPayload of sqlPayloads.participantPayloads) {
+            await insertIntoDatabase({ personPayload: null, eventPayload: null, participantPayloads: [participantPayload], newPersons: [], newEvents: [] });
+          }
+        }
+        
+        console.log('\n✅ Database insertion completed successfully');
         
         // Update OpenSearch index (full reindex for now)
         try {

@@ -36,15 +36,35 @@ async function processWebhookToBirthRegistration(webhookBody) {
     e.resource?.gender
   )?.resource;
   
-  // Mother and father are Patients without gender field and active
+  // Get all active parent patients (without gender)
   const parentPatients = entries.filter(e => 
     e.resource?.resourceType === 'Patient' && 
     !e.resource?.gender &&
     e.resource?.active === true
   ).map(e => e.resource);
   
-  const mother = parentPatients[0] || null; // First parent is mother
-  const father = parentPatients[1] || null; // Second parent is father (if exists)
+  // Use stored parent FHIR IDs to correctly identify mother and father
+  const storedParentIds = global.lastParentIds;
+  let mother = storedParentIds?.motherId ? 
+    parentPatients.find(p => p.id === storedParentIds.motherId) || null :
+    null;
+  let father = storedParentIds?.fatherId ? 
+    parentPatients.find(p => p.id === storedParentIds.fatherId) || null :
+    null;
+    
+  // Fallback: if RelatedPerson missing, identify by external UUID (mother usually has it)
+  if (!mother && !father && parentPatients.length > 0) {
+    const patientWithExternal = parentPatients.find(p => 
+      p.identifier?.some(id => id.type?.coding?.some(c => c.code === 'EXTERNAL_PERSON_ID'))
+    );
+    const patientWithoutExternal = parentPatients.find(p => 
+      !p.identifier?.some(id => id.type?.coding?.some(c => c.code === 'EXTERNAL_PERSON_ID'))
+    );
+    
+    // Assume patient with external UUID is mother, without is father
+    mother = patientWithExternal || parentPatients[0];
+    father = patientWithoutExternal || (parentPatients.length > 1 ? parentPatients[1] : null);
+  }
   
   // Check if father exists in the data
   const hasFather = father !== null;
@@ -67,7 +87,7 @@ async function processWebhookToBirthRegistration(webhookBody) {
   const localEventId = crypto.randomUUID();
   
   // Extract external UUIDs from identifiers or generate new ones
-  const motherExternalUuid = mother.identifier?.find(id => 
+  const motherExternalUuid = mother?.identifier?.find(id => 
     id.type?.coding?.some(c => c.code === 'EXTERNAL_PERSON_ID')
   )?.value;
   const localMotherId = motherExternalUuid || crypto.randomUUID();
